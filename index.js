@@ -36,7 +36,7 @@ async function conectarWhatsApp() {
 
         if (qr) {
             console.log('📱 Escaneie o QR Code abaixo com o seu WhatsApp:');
-            qrcode.generate(qr, { small: true });
+            qrcode.generate(qr, { small: false });
         }
 
         if (connection === 'close') {
