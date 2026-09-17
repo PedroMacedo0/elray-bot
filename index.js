@@ -130,14 +130,23 @@ Aja com simpatia e peça SOMENTE os dados que faltam (idade, cidade ou estado) p
                 const estadoCru = partes[1].trim();
                 const cidade = partes[2].trim();
                 const idadesStr = partes[3];
-                const arrayIdades = idadesStr.split(',').map(i => parseInt(i.trim()));
+
+                // Extração inteligente de múltiplas idades (lida com "e", "anos", vírgulas, etc.)
+                const arrayIdades = idadesStr
+                    .toLowerCase()
+                    .replace(/anos?/g, '')
+                    .replace(/\s+e\s+/g, ',')
+                    .split(/[,;\s]+/)
+                    .map(i => parseInt(i.trim()))
+                    .filter(i => !isNaN(i));
 
                 await enviarTextoWhatsApp(numeroCliente, "⏳ Só um instante! Estou calculando os melhores valores e preparando o PDF da rede hospitalar...");
 
                 const resultado = cotarPorCidade(estadoCru.toLowerCase(), cidade, arrayIdades);
 
                 if (resultado.sucesso) {
-                    let respostaFinal = `✅ *Cotação Finalizada!*\n\nEncontrei estes planos para a região de *${cidade}*:\n\n`;
+                    // Mensagem com Cidade, Estado e as Idades enviadas
+                    let respostaFinal = `✅ *Cotação Finalizada!*\n\nEncontrei estes planos para *${cidade} (${estadoCru.toUpperCase()})* para a(s) idade(s): *${idadesStr}*:\n\n`;
                     
                     resultado.dados.planos.forEach(p => {
                         respostaFinal += `🛡️ *${p.plano}*\n💰 TOTAL: R$ ${p.preco_total}\n〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️\n`;
@@ -145,17 +154,42 @@ Aja com simpatia e peça SOMENTE os dados que faltam (idade, cidade ou estado) p
                     
                     respostaFinal += `\n_(Valores com coparticipação parcial na enfermaria. Sujeito a análise técnica)._\n\n`;
 
+                    // --- CÁLCULO AUTOMÁTICO DE DATAS DA CAMPANHA (Sempre mês seguinte, virando dia 23) ---
+                    const agora = new Date();
+                    const diaDoMes = agora.getDate();
+                    
+                    let mesAlvo = agora.getMonth() + 2; 
+                    let anoAlvo = agora.getFullYear();
+
+                    if (diaDoMes >= 23) {
+                        mesAlvo += 1;
+                    }
+                    
+                    if (mesAlvo > 12) {
+                        mesAlvo = 1;
+                        anoAlvo += 1;
+                    }
+
+                    const mesesNomes = ["", "janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
+                    const nomeMesVigencia = mesesNomes[mesAlvo];
+
+                    let mesSeguinteAlvo = mesAlvo + 1;
+                    if (mesSeguinteAlvo > 12) {
+                        mesSeguinteAlvo = 1;
+                    }
+                    const nomeMesSeguinte = mesesNomes[mesSeguinteAlvo];
+
                     respostaFinal += `📅 *Informações importantes sobre a implantação:*\n`;
-                    respostaFinal += `* Vigência: 01 de julho\n`;
+                    respostaFinal += `* Vigência: 01 de ${nomeMesVigencia}\n`;
                     respostaFinal += `* A proposta é implantada após a contratação\n\n`;
                     
                     respostaFinal += `💳 *Pagamento:*\n`;
                     respostaFinal += `* A 1ª mensalidade (taxa de adesão) é paga no ato da contratação\n`;
-                    respostaFinal += `* O primeiro boleto da operadora vence em 01 de julho\n\n`;
+                    respostaFinal += `* O primeiro boleto da operadora vence em 01 de ${nomeMesVigencia}\n\n`;
                     
                     respostaFinal += `⏱️ *Liberação de uso:*\n`;
-                    respostaFinal += `* Urgência e emergência: a partir de 10 de julho\n`;
-                    respostaFinal += `* Demais procedimentos: a partir de 01 de agosto\n`;
+                    respostaFinal += `* Urgência e emergência: a partir de 10 de ${nomeMesVigencia}\n`;
+                    respostaFinal += `* Demais procedimentos: a partir de 01 de ${nomeMesSeguinte}\n`;
 
                     await enviarTextoWhatsApp(numeroCliente, respostaFinal);
                     await buscarEEnviarPDF(numeroCliente, estadoCru.toUpperCase());
@@ -211,6 +245,5 @@ async function enviarTextoWhatsApp(phoneJid, message) {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 Servidor Express rodando na porta ${PORT}`);
-    // Inicia a conexão com o WhatsApp
     conectarWhatsApp();
 });
