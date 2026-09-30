@@ -230,7 +230,6 @@ Aja com simpatia e peça SOMENTE os dados que faltam (idade, cidade ou estado) p
                     respostaFinal += `* A 1ª mensalidade (taxa de adesão) é paga no ato da contratação\n`;
                     respostaFinal += `* O primeiro boleto da operadora vence em 01 de ${nomeMesVigencia}\n\n`;
                     
-                    respostaFinal += `⏱️ *Liberação de uso:*\n`;
                     respostaFinal += `⏱️ *Liberação de uso (após o início da vigência):*\n`;
                     respostaFinal += `* Consultas, exames simples e urgência/emergência: 24 horas\n`;
                     respostaFinal += `* Demais procedimentos: a partir de 90 dias\n`;
