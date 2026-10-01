@@ -5,10 +5,17 @@ const path = require('path');
 const { OpenAI } = require('openai');
 const { cotarPorCidade } = require('./src/calculadora.js');
 
-// Importações do Baileys e utilitários do WhatsApp
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+// Importações do Banco de Dados e Baileys
+const { Pool } = require('pg');
+const { 
+    default: makeWASocket, 
+    initAuthCreds, 
+    BufferJSON, 
+    proto, 
+    DisconnectReason 
+} = require('@whiskeysockets/baileys');
 const qrcodeTerminal = require('qrcode-terminal');
-const QRCode = require('qrcode'); // Biblioteca para gerar imagem web
+const QRCode = require('qrcode');
 const pino = require('pino');
 
 const app = express();
@@ -18,19 +25,39 @@ const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Variáveis globais para gerenciar o estado da conexão e o QR Code na web
+// Configuração do Banco de Dados PostgreSQL (Pega a URL do painel do Render)
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+});
+
+// Variáveis globais
 let sock;
 let ultimoQrCodeString = null;
 let statusConexao = 'Aguardando inicialização...';
 
-// Rota web para exibir o QR Code no navegador (ex: https://elray-bot.onrender.com/)
-app.get('/', async (req, res) => {
+// Autenticação da Web
+const WEB_USER = process.env.WEB_USER || 'admin';
+const WEB_PASS = process.env.WEB_PASS || 'elray2026';
+
+function verificarAutenticacao(req, res, next) {
+    const b64auth = (req.headers.authorization || '').split(' ')[1] || '';
+    const [user, pass] = Buffer.from(b64auth, 'base64').toString().split(':');
+
+    if (user === WEB_USER && pass === WEB_PASS) {
+        return next();
+    }
+    res.set('WWW-Authenticate', 'Basic realm="Acesso Restrito - ELRAY Bot"');
+    res.status(401).send('Autenticação necessária para aceder ao QR Code.');
+}
+
+app.get('/', verificarAutenticacao, async (req, res) => {
     if (statusConexao === 'Conectado') {
         return res.send(`
             <html>
                 <body style="font-family: Arial; text-align: center; padding-top: 50px; background-color: #f4f6f8;">
                     <h1 style="color: #2e7d32;">✅ WhatsApp Conectado com Sucesso!</h1>
-                    <p>O bot da ELRAY está ativo e operando normalmente na nuvem.</p>
+                    <p>O bot da ELRAY está ativo e a operar normalmente na nuvem.</p>
                 </body>
             </html>
         `);
@@ -40,20 +67,19 @@ app.get('/', async (req, res) => {
         return res.send(`
             <html>
                 <body style="font-family: Arial; text-align: center; padding-top: 50px; background-color: #f4f6f8;">
-                    <h2>⏳ Gerando QR Code, aguarde um instante e atualize a página...</h2>
+                    <h2>⏳ A gerar QR Code, aguarde um instante e atualize a página...</h2>
                 </body>
             </html>
         `);
     }
 
     try {
-        // Converte a string do QR Code em uma imagem DataURL (PNG)
         const qrCodeImage = await QRCode.toDataURL(ultimoQrCodeString);
         res.send(`
             <html>
                 <head>
                     <title>Conectar WhatsApp - ELRAY Bot</title>
-                    <meta http-equiv="refresh" content="5"> <!-- Atualiza a página a cada 5 segundos se não conectar -->
+                    <meta http-equiv="refresh" content="5">
                 </head>
                 <body style="font-family: Arial; text-align: center; padding-top: 30px; background-color: #f4f6f8;">
                     <h2 style="color: #1565c0;">📱 Escaneie o QR Code abaixo com o seu WhatsApp</h2>
@@ -70,8 +96,88 @@ app.get('/', async (req, res) => {
     }
 });
 
+// ============================================================================
+// ADAPTADOR PARA SALVAR SESSÃO NO BANCO DE DADOS EM VEZ DE PASTA
+// ============================================================================
+async function usePostgresAuthState(sessionName) {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS baileys_auth (
+            session_name VARCHAR(50),
+            key_name VARCHAR(255),
+            data TEXT,
+            PRIMARY KEY (session_name, key_name)
+        )
+    `);
+
+    const writeData = async (data, key) => {
+        const dataString = JSON.stringify(data, BufferJSON.replacer);
+        await pool.query(
+            `INSERT INTO baileys_auth (session_name, key_name, data) VALUES ($1, $2, $3) 
+             ON CONFLICT (session_name, key_name) DO UPDATE SET data = EXCLUDED.data`,
+            [sessionName, key, dataString]
+        );
+    };
+
+    const readData = async (key) => {
+        const res = await pool.query('SELECT data FROM baileys_auth WHERE session_name = $1 AND key_name = $2', [sessionName, key]);
+        if (res.rows.length > 0) {
+            return JSON.parse(res.rows[0].data, BufferJSON.reviver);
+        }
+        return null;
+    };
+
+    const removeData = async (key) => {
+        await pool.query('DELETE FROM baileys_auth WHERE session_name = $1 AND key_name = $2', [sessionName, key]);
+    };
+
+    let creds = await readData('creds');
+    if (!creds) {
+        creds = initAuthCreds();
+        await writeData(creds, 'creds');
+    }
+
+    return {
+        state: {
+            creds,
+            keys: {
+                get: async (type, ids) => {
+                    const data = {};
+                    await Promise.all(ids.map(async (id) => {
+                        let value = await readData(`${type}-${id}`);
+                        if (type === 'app-state-sync-key' && value) {
+                            value = proto.Message.AppStateSyncKeyData.fromObject(value);
+                        }
+                        data[id] = value;
+                    }));
+                    return data;
+                },
+                set: async (data) => {
+                    const tasks = [];
+                    for (const category in data) {
+                        for (const id in data[category]) {
+                            const value = data[category][id];
+                            const key = `${category}-${id}`;
+                            if (value) {
+                                tasks.push(writeData(value, key));
+                            } else {
+                                tasks.push(removeData(key));
+                            }
+                        }
+                    }
+                    await Promise.all(tasks);
+                }
+            }
+        },
+        saveCreds: () => writeData(creds, 'creds'),
+        clearState: async () => {
+            await pool.query('DELETE FROM baileys_auth WHERE session_name = $1', [sessionName]);
+        }
+    };
+}
+
 async function conectarWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    // Agora puxamos o "state" direto do banco de dados (Sessão: ray_bot)
+    const { state, saveCreds, clearState } = await usePostgresAuthState('ray_bot');
 
     sock = makeWASocket({
         auth: state,
@@ -83,29 +189,60 @@ async function conectarWhatsApp() {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            ultimoQrCodeString = qr; // Salva o QR code para exibir no site
+            ultimoQrCodeString = qr;
             statusConexao = 'Aguardando leitura do QR Code';
             console.log('📱 Novo QR Code gerado! Acesse a URL web para escanear.');
-            qrcodeTerminal.generate(qr, { small: true }); // Continua gerando no terminal por garantia
+            qrcodeTerminal.generate(qr, { small: true });
+        }
+
+        if (connection === 'connecting') {
+            statusConexao = 'Conectando';
+            console.log('⏳ Conectando a Ray ao WhatsApp...');
+        }
+
+        if (connection === 'open') {
+            statusConexao = 'Conectado';
+            ultimoQrCodeString = null;
+            console.log('✅ WhatsApp conectado com sucesso! Ray operacional.');
         }
 
         if (connection === 'close') {
             statusConexao = 'Desconectado';
-            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('connection closed due to ', lastDisconnect.error, ', reconnecting ', shouldReconnect);
-            if (shouldReconnect) {
-                conectarWhatsApp();
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            const motivo = lastDisconnect?.error?.message || 'Desconhecido';
+            
+            console.warn(`⚠️ Conexão da Ray encerrada. Motivo: ${motivo} (Code: ${statusCode})`);
+
+            const desconectadoPeloUsuario = statusCode === DisconnectReason.loggedOut;
+            const falhaInternaOuTimeout = statusCode === DisconnectReason.connectionClosed || 
+                                          statusCode === DisconnectReason.connectionLost || 
+                                          statusCode === DisconnectReason.timedOut ||
+                                          statusCode === 503 || 
+                                          statusCode === 440 ||
+                                          statusCode === 408;
+
+            if (desconectadoPeloUsuario) {
+                console.log('❌ Sessão desconectada ativamente pelo celular. Limpando BANCO DE DADOS...');
+                ultimoQrCodeString = null;
+                try {
+                    await clearState(); // Apaga a sessão do DB
+                } catch (e) {}
+                setTimeout(() => conectarWhatsApp(), 2000);
+            } else if (falhaInternaOuTimeout) {
+                console.log(`🔄 Queda de servidor/rede detectada (Code: ${statusCode}). Reconectando em 5 segundos...`);
+                setTimeout(() => conectarWhatsApp(), 5000);
+            } else {
+                console.log(`🔄 Reinício necessário (Code: ${statusCode}). Reconectando em 3 segundos...`);
+                setTimeout(() => conectarWhatsApp(), 3000);
             }
-        } else if (connection === 'open') {
-            statusConexao = 'Conectado';
-            ultimoQrCodeString = null; // Limpa o QR code pois já conectou
-            console.log('✅ WhatsApp conectado com sucesso!');
         }
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    // Ouvindo mensagens recebidas
+    // ============================================================================
+    // OUVINDO MENSAGENS E ENVIANDO COTAÇÕES (LÓGICA DA RAY MANTIDA)
+    // ============================================================================
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
 
@@ -193,7 +330,7 @@ Aja com simpatia e peça SOMENTE os dados que faltam (idade, cidade ou estado) p
                     let respostaFinal = `✅ *Cotação Finalizada!*\n\nEncontrei estes planos para *${cidade} (${estadoCru.toUpperCase()})* para a(s) idade(s): *${idadesStr}*:\n\n`;
                     
                     resultado.dados.planos.forEach(p => {
-                        respostaFinal += `🛡️ *${p.plano}*\n💰 TOTAL: R$ ${p.preco_total}\n〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️\n`;
+                        respostaFinal += `🛡️ *${p.plano}*\n💰 TOTAL: R$ ${p.preco_total}\n〰️️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️\n`;
                     });
                     
                     respostaFinal += `\n_(Valores com coparticipação parcial na enfermaria. Sujeito a análise técnica)._\n\n`;
@@ -216,12 +353,6 @@ Aja com simpatia e peça SOMENTE os dados que faltam (idade, cidade ou estado) p
                     const mesesNomes = ["", "janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
                     const nomeMesVigencia = mesesNomes[mesAlvo];
 
-                    let mesSeguinteAlvo = mesAlvo + 1;
-                    if (mesSeguinteAlvo > 12) {
-                        mesSeguinteAlvo = 1;
-                    }
-                    const nomeMesSeguinte = mesesNomes[mesSeguinteAlvo];
-
                     respostaFinal += `📅 *Informações importantes sobre a implantação:*\n`;
                     respostaFinal += `* Vigência: 01 de ${nomeMesVigencia}\n`;
                     respostaFinal += `* A proposta é implantada após a contratação\n\n`;
@@ -230,6 +361,7 @@ Aja com simpatia e peça SOMENTE os dados que faltam (idade, cidade ou estado) p
                     respostaFinal += `* A 1ª mensalidade (taxa de adesão) é paga no ato da contratação\n`;
                     respostaFinal += `* O primeiro boleto da operadora vence em 01 de ${nomeMesVigencia}\n\n`;
                     
+                    // REGRAS DE CARÊNCIA ATUALIZADAS AQUI!
                     respostaFinal += `⏱️ *Liberação de uso (após o início da vigência):*\n`;
                     respostaFinal += `* Consultas, exames simples e urgência/emergência: 24 horas\n`;
                     respostaFinal += `* Demais procedimentos: a partir de 90 dias\n`;
