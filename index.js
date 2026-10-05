@@ -36,22 +36,7 @@ let sock;
 let ultimoQrCodeString = null;
 let statusConexao = 'Aguardando inicialização...';
 
-// Autenticação da Web
-const WEB_USER = process.env.WEB_USER || 'admin';
-const WEB_PASS = process.env.WEB_PASS || 'elray2026';
-
-function verificarAutenticacao(req, res, next) {
-    const b64auth = (req.headers.authorization || '').split(' ')[1] || '';
-    const [user, pass] = Buffer.from(b64auth, 'base64').toString().split(':');
-
-    if (user === WEB_USER && pass === WEB_PASS) {
-        return next();
-    }
-    res.set('WWW-Authenticate', 'Basic realm="Acesso Restrito - ELRAY Bot"');
-    res.status(401).send('Autenticação necessária para aceder ao QR Code.');
-}
-
-app.get('/', verificarAutenticacao, async (req, res) => {
+app.get('/', async (req, res) => {
     if (statusConexao === 'Conectado') {
         return res.send(`
             <html>
